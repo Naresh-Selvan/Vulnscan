@@ -481,3 +481,19 @@ class CryptoChecker(Checker):
                 check_id="crypto-008",
             ))
         return findings
+
+    def _check_private_ssh_keys(self) -> List[Finding]:
+        findings = []
+        out = _run(["find", "/", "-name", "id_rsa", "-o", "-name", "id_ed25519", "-type", "f", "-perm", "/077", "2>/dev/null"])
+        if out and out.strip():
+            keys = out.strip().splitlines()
+            findings.append(Finding(
+                title="Poorly protected SSH private keys",
+                severity=Severity.HIGH,
+                description="SSH private keys were found with overly permissive file permissions. Any local user might be able to read these keys and pivot laterally.",
+                evidence="\n".join(keys[:20]),
+                remediation="Run: chmod 600 <key_file>",
+                module=self.module_name,
+                check_id="crypto-009",
+            ))
+        return findings

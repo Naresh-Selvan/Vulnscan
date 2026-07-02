@@ -223,3 +223,27 @@ class KernelChecker(Checker):
             module=self.module_name,
             check_id="kern-008",
         )]
+
+    def _check_kernel_cves(self) -> List[Finding]:
+        version = _run(["uname", "-r"]).strip()
+        if not version:
+            return []
+        
+        cves = []
+        if "5.8" in version or "5.10" in version or "5.16" in version:
+            cves.append("CVE-2022-0847 (DirtyPipe)")
+        if "2.6.22" in version or "4.14" in version:
+            cves.append("CVE-2016-5195 (DirtyCOW)")
+            
+        if not cves:
+            return []
+            
+        return [Finding(
+            title="Known High-Impact Kernel CVEs",
+            severity=Severity.HIGH,
+            description=f"The running kernel version ({version}) matches ranges known to be vulnerable to highly exploited Local Privilege Escalation vulnerabilities.",
+            evidence=f"Kernel version: {version}\nPotential CVEs: {', '.join(cves)}",
+            remediation="Upgrade the kernel to a patched version immediately.",
+            module=self.module_name,
+            check_id="kern-009"
+        )]

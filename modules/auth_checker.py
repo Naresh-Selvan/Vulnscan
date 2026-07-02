@@ -525,3 +525,19 @@ class AuthChecker(Checker):
                 check_id="auth-021",
             ))
         return findings
+
+    def _check_ssh_authorized_keys(self) -> List[Finding]:
+        findings = []
+        out = _run(["find", "/", "-name", "authorized_keys", "-type", "f", "-perm", "-0002", "2>/dev/null"])
+        if out and out.strip():
+            files = out.strip().splitlines()
+            findings.append(Finding(
+                title="World-writable SSH authorized_keys",
+                severity=Severity.CRITICAL,
+                description="SSH authorized_keys files were found to be world-writable. Any user can add their own SSH key and log in as the victim user (potentially root).",
+                evidence="\n".join(files),
+                remediation="Run: chmod 600 ~/.ssh/authorized_keys",
+                module=self.module_name,
+                check_id="auth-022"
+            ))
+        return findings

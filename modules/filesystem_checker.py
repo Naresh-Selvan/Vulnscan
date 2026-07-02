@@ -286,3 +286,19 @@ class FilesystemChecker(Checker):
                 check_id="fs-007",
             ))
         return findings
+
+    def _check_world_writable_sockets(self) -> List[Finding]:
+        findings = []
+        out = _run(["find", "/", "-type", "s", "-perm", "-0002", "-ls", "2>/dev/null"])
+        if out and out.strip():
+            sockets = out.strip().splitlines()
+            findings.append(Finding(
+                title="World-writable UNIX domain sockets",
+                severity=Severity.HIGH,
+                description="UNIX domain sockets with world-writable permissions were found. Attackers can connect to these sockets to interact with privileged services, potentially leading to LPE.",
+                evidence="\n".join(sockets[:20]),
+                remediation="Ensure sockets are created with restricted permissions or placed in protected directories.",
+                module=self.module_name,
+                check_id="fs-008",
+            ))
+        return findings
