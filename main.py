@@ -41,6 +41,8 @@ MODULE_REGISTRY = {
     "cron":       ("modules.cron_checker",        "CronChecker"),
     "process":    ("modules.process_checker",     "ProcessChecker"),
     "nfs":        ("modules.nfs_checker",         "NfsChecker"),
+    "services":   ("modules.services_checker",    "ServicesChecker"),
+    "system_health": ("modules.system_checker",   "SystemChecker"),
 }
 
 # IO-heavy modules run sequentially to avoid hammering disk concurrently

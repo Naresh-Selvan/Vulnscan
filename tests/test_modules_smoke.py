@@ -33,6 +33,8 @@ ALL_MODULES = [
     ("modules.cron_checker",       "CronChecker"),
     ("modules.process_checker",    "ProcessChecker"),
     ("modules.nfs_checker",        "NfsChecker"),
+    ("modules.services_checker",   "ServicesChecker"),
+    ("modules.system_checker",     "SystemChecker"),
 ]
 
 
