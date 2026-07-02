@@ -1,8 +1,8 @@
 """Module 2: Authentication, Access Control & Privilege Management."""
 from __future__ import annotations
-import subprocess
 import stat
 import re
+import os
 from pathlib import Path
 from typing import List
 from core.models import Checker, Finding, Severity
@@ -539,5 +539,35 @@ class AuthChecker(Checker):
                 remediation="Run: chmod 600 ~/.ssh/authorized_keys",
                 module=self.module_name,
                 check_id="auth-022"
+            ))
+        return findings
+
+    def _check_path_environment(self) -> List[Finding]:
+        findings = []
+        path_var = _run(["printenv", "PATH"]).strip()
+        if not path_var:
+            return []
+            
+        paths = path_var.split(':')
+        vulnerable_paths = []
+        for p in paths:
+            if p == "" or p == "." or not p.startswith("/"):
+                vulnerable_paths.append(f"Relative path found: '{p}'")
+            elif Path(p).exists():
+                try:
+                    if os.stat(p).st_mode & 0o002:
+                        vulnerable_paths.append(f"World-writable path found: '{p}'")
+                except OSError:
+                    pass
+                    
+        if vulnerable_paths:
+            findings.append(Finding(
+                title="Insecure PATH environment variable",
+                severity=Severity.HIGH,
+                description="The PATH environment variable contains relative or world-writable directories. This allows local privilege escalation via PATH hijacking if a privileged user or script executes a command without an absolute path.",
+                evidence="\n".join(vulnerable_paths),
+                remediation="Remove relative and world-writable directories from PATH.",
+                module=self.module_name,
+                check_id="auth-023"
             ))
         return findings
