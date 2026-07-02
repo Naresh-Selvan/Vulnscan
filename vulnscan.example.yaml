@@ -1,0 +1,30 @@
+# vulnscan.yaml — Default configuration for vulnscan
+# Command-line flags always override these values.
+
+# Target host to scan (must match an entry in allowlist.yaml)
+target: localhost
+
+# Path to the allowlist file
+allowlist: allowlist.yaml
+
+# Output directory for reports
+output_dir: reports
+
+# Report formats to generate (comma-separated or YAML list)
+format: json,markdown,html
+
+# Append-only audit log path
+log: vulnscan_audit.log
+
+# Run modules in parallel (true/false)
+parallel: true
+
+# Number of parallel worker threads
+workers: 4
+
+# Modules to run by default (list or 'all')
+modules:
+  - all
+
+# Path to a previous report.json to diff against (leave blank to skip)
+# baseline: reports/report.json

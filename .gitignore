@@ -1,0 +1,31 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Pytest / Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Virtual Environments
+venv/
+env/
+.env
+
+# Built executables / zipapps
+*.pyz
+*.zip
+
+# Logs and Reports
+*.log
+reports/
+final_reports/
+
+# Local configurations (do not commit sensitive IPs/keys)
+allowlist.yaml
+vulnscan.yaml
+
+# OS generated files
+.DS_Store
+Thumbs.db
