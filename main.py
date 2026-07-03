@@ -7,6 +7,7 @@ analysis against a single allowlisted Linux host. No exploitation.
 """
 from __future__ import annotations
 import sys
+import time
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -43,6 +44,12 @@ MODULE_REGISTRY = {
     "nfs":        ("modules.nfs_checker",         "NfsChecker"),
     "services":   ("modules.services_checker",    "ServicesChecker"),
     "system_health": ("modules.system_checker",   "SystemChecker"),
+    "memory":     ("modules.memory_checker",      "MemoryChecker"),
+    "user_accounts": ("modules.user_checker",     "UserChecker"),
+    "cpu":        ("modules.cpu_checker",         "CpuChecker"),
+    "binary":     ("modules.binary_checker",      "BinaryChecker"),
+    "bootkit":    ("modules.bootkit_checker",     "BootkitChecker"),
+    "ipc":        ("modules.ipc_checker",         "IpcChecker"),
 }
 
 # IO-heavy modules run sequentially to avoid hammering disk concurrently
@@ -98,6 +105,11 @@ def _banner():
               help="Run modules concurrently. [default: from config or true]")
 @click.option("--workers",     default=None, type=int,
               help="Parallel worker count. [default: from config or 4]")
+@click.option("--severity",    "-sev", default=None,
+              type=click.Choice(["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO", "ALL"], case_sensitive=False),
+              help="Minimum severity to report.")
+@click.option("--category",    "-cat", default=None,
+              help="Filter by finding category (e.g., Security, System Health).")
 @click.option("--init-config", is_flag=True, default=False,
               help="Write a commented vulnscan.yaml to the current directory and exit.")
 def main(
@@ -113,6 +125,8 @@ def main(
     baseline: Optional[str],
     parallel: Optional[bool],
     workers: Optional[int],
+    severity: Optional[str],
+    category: Optional[str],
     init_config: bool,
 ):
     """
@@ -217,6 +231,7 @@ def main(
 
     # ── Run modules ────────────────────────────────────────────────────────────
     all_findings: List[Finding] = []
+    module_timings: dict = {}
     parallel_keys   = [k for k in selected if k not in _SEQUENTIAL_MODULES]
     sequential_keys = [k for k in selected if k in _SEQUENTIAL_MODULES]
 
@@ -237,8 +252,9 @@ def main(
                 for k in parallel_keys
             }
             for future in concurrent.futures.as_completed(future_to_key):
-                key, findings, error = future.result()
+                key, findings, dur, error = future.result()
                 results_map[key] = (findings, error)
+                module_timings[key] = dur
                 with _print_lock:
                     if error:
                         click.echo(
@@ -249,7 +265,7 @@ def main(
                         cnt = _count_by_severity(findings)
                         click.echo(
                             f"    [OK]  {key:14}  "
-                            f"{len(findings):3} findings  {_fmt_counts(cnt)}"
+                            f"{len(findings):3} findings  {_fmt_counts(cnt)} ({dur:.1f}s)"
                         )
                         logger.info(f"Module done: {key} | findings={len(findings)}")
 
@@ -258,7 +274,7 @@ def main(
             all_findings.extend(findings)
     else:
         for key in parallel_keys:
-            _run_sequential(key, logger, quiet, all_findings)
+            _run_sequential(key, logger, quiet, all_findings, module_timings)
 
     if sequential_keys and not quiet:
         click.echo(
@@ -268,13 +284,30 @@ def main(
             )
         )
     for key in sequential_keys:
-        _run_sequential(key, logger, quiet, all_findings)
+        _run_sequential(key, logger, quiet, all_findings, module_timings)
+
+    # ── Filter findings ────────────────────────────────────────────────────────
+    filtered = []
+    min_sev_val = -1
+    if severity and severity.upper() != "ALL":
+        from core.models import Severity
+        try:
+            min_sev_val = Severity[severity.upper()].value
+        except KeyError:
+            pass
+
+    for f in all_findings:
+        if min_sev_val != -1 and f.severity.value < min_sev_val:
+            continue
+        if category and category.lower() not in f.category.lower():
+            continue
+        filtered.append(f)
 
     # ── Generate reports ───────────────────────────────────────────────────────
     out_path = Path(eff_output_dir)
     out_path.mkdir(parents=True, exist_ok=True)
 
-    report = Report(all_findings, target=eff_target)
+    report = Report(filtered, target=eff_target, timings=module_timings)
     formats = [f.strip().lower() for f in eff_fmt.split(",")]
 
     generated = []
@@ -370,29 +403,36 @@ def main(
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 def _run_module(key: str, dry_run: bool, logger, quiet: bool):
+    t0 = time.time()
     try:
         checker = _load_checker(key, dry_run=dry_run, logger=logger)
         findings = checker.run()
-        return key, findings, None
+        dur = time.time() - t0
+        return key, findings, dur, None
     except Exception as exc:
-        return key, [], str(exc)
+        return key, [], time.time() - t0, str(exc)
 
 
-def _run_sequential(key: str, logger, quiet: bool, collector: List[Finding]) -> None:
+def _run_sequential(key: str, logger, quiet: bool, collector: List[Finding], timings: dict) -> None:
     if not quiet:
         click.echo(click.style(f"  >> Running module: {key}...", fg="blue"))
     logger.info(f"Module start: {key}")
+    t0 = time.time()
     try:
         checker = _load_checker(key, dry_run=False, logger=logger)
         findings = checker.run()
+        dur = time.time() - t0
+        timings[key] = dur
         collector.extend(findings)
         if not quiet:
             cnt = _count_by_severity(findings)
             click.echo(
-                f"     OK  {key:14}  {len(findings):3} findings  {_fmt_counts(cnt)}"
+                f"     OK  {key:14}  {len(findings):3} findings  {_fmt_counts(cnt)} ({dur:.1f}s)"
             )
         logger.info(f"Module done: {key} | findings={len(findings)}")
     except Exception as exc:
+        dur = time.time() - t0
+        timings[key] = dur
         click.echo(click.style(f"     FAIL {key}: {exc}", fg="red"), err=True)
         logger.error(f"Module {key} raised exception: {exc}")
 

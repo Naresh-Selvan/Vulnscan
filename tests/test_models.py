@@ -71,6 +71,7 @@ class TestFinding:
         expected_keys = {
             "title", "severity", "description", "evidence", "remediation",
             "cve_refs", "cis_refs", "module", "check_id", "timestamp",
+            "risk_score", "category", "affected_asset",
         }
         assert set(d.keys()) == expected_keys
 

@@ -33,6 +33,11 @@ class NetworkChecker(Checker):
             "Check for IPv6 exposure",
             "Check for unnecessary services enabled at boot (systemctl)",
             "Audit IPv4 forwarding and source routing (sysctl)",
+            "Check DNS resolver configuration for security",
+            "Detect network interfaces in promiscuous mode (sniffing)",
+            "Audit TCP wrappers (/etc/hosts.allow, /etc/hosts.deny)",
+            "Check ICMP redirect acceptance (MITM vector)",
+            "Detect SYN flood protection (tcp_syncookies)",
         ]
 
     def run(self) -> List[Finding]:
@@ -44,6 +49,11 @@ class NetworkChecker(Checker):
         findings += self._check_ipv6()
         findings += self._check_boot_services()
         findings += self._check_sysctl_routing()
+        findings += self._check_dns_config()
+        findings += self._check_promiscuous_mode()
+        findings += self._check_tcp_wrappers()
+        findings += self._check_icmp_redirects()
+        findings += self._check_syn_cookies()
         return findings
 
     def _check_listening_ports(self) -> List[Finding]:
@@ -275,3 +285,152 @@ class NetworkChecker(Checker):
             ))
             
         return findings
+
+    def _check_dns_config(self) -> List[Finding]:
+        findings = []
+        resolv = _read("/etc/resolv.conf")
+        if not resolv:
+            return []
+        nameservers = [l.split()[1] for l in resolv.splitlines()
+                       if l.strip().startswith("nameserver") and len(l.split()) > 1]
+        public_dns = {"8.8.8.8", "8.8.4.4", "1.1.1.1", "1.0.0.1", "208.67.222.222", "208.67.220.220"}
+        using_public = [ns for ns in nameservers if ns in public_dns]
+        if using_public:
+            findings.append(Finding(
+                title="Using public DNS resolvers without encryption",
+                severity=Severity.LOW,
+                category="Security",
+                description=(
+                    "DNS queries are sent to public resolvers in plaintext. "
+                    "This exposes browsing activity to network eavesdroppers and ISPs. "
+                    "Consider using DNS-over-HTTPS (DoH) or DNS-over-TLS (DoT)."
+                ),
+                evidence=f"Public DNS servers: {', '.join(using_public)}",
+                remediation="Configure encrypted DNS (systemd-resolved with DoT, or stubby/dnscrypt-proxy).",
+                cis_refs=["CIS Linux 3.4.1"],
+                module=self.module_name,
+                check_id="net-010",
+            ))
+        return findings
+
+    def _check_promiscuous_mode(self) -> List[Finding]:
+        findings = []
+        out = _run(["ip", "link", "show"])
+        promisc_ifaces = []
+        for line in out.splitlines():
+            if "PROMISC" in line:
+                parts = line.split(":")
+                if len(parts) >= 2:
+                    promisc_ifaces.append(parts[1].strip())
+        if promisc_ifaces:
+            findings.append(Finding(
+                title="Network interface(s) in promiscuous mode",
+                severity=Severity.HIGH,
+                category="Security",
+                description=(
+                    "One or more network interfaces are in promiscuous mode, capturing ALL "
+                    "network traffic on the segment. This is a strong indicator of network "
+                    "sniffing (packet capture) which may be malicious."
+                ),
+                evidence=f"Promiscuous interfaces: {', '.join(promisc_ifaces)}",
+                remediation="Disable promiscuous mode: `ip link set <iface> promisc off`. Investigate why it was enabled.",
+                module=self.module_name,
+                check_id="net-011",
+                affected_asset=promisc_ifaces[0],
+            ))
+        return findings
+
+    def _check_tcp_wrappers(self) -> List[Finding]:
+        findings = []
+        hosts_allow = _read("/etc/hosts.allow").strip()
+        hosts_deny = _read("/etc/hosts.deny").strip()
+        # Filter out comments and empty lines
+        allow_rules = [l for l in hosts_allow.splitlines() if l.strip() and not l.strip().startswith("#")]
+        deny_rules = [l for l in hosts_deny.splitlines() if l.strip() and not l.strip().startswith("#")]
+
+        if not deny_rules:
+            findings.append(Finding(
+                title="TCP Wrappers: no default deny rule configured",
+                severity=Severity.LOW,
+                category="Security",
+                description=(
+                    "/etc/hosts.deny is empty or has no active rules. Without a default "
+                    "deny policy, TCP-wrapped services accept connections from any host."
+                ),
+                evidence="hosts.deny: (empty or comments only)",
+                remediation="Add `ALL: ALL` to /etc/hosts.deny and whitelist specific hosts in /etc/hosts.allow.",
+                cis_refs=["CIS Linux 3.4.3"],
+                module=self.module_name,
+                check_id="net-012",
+            ))
+        # Check for overly permissive allow rules
+        for rule in allow_rules:
+            if "ALL: ALL" in rule.upper():
+                findings.append(Finding(
+                    title="TCP Wrappers: ALL:ALL in hosts.allow (bypasses deny)",
+                    severity=Severity.MEDIUM,
+                    category="Security",
+                    description="hosts.allow contains ALL:ALL which permits all connections, overriding hosts.deny.",
+                    evidence=f"Rule: {rule}",
+                    remediation="Remove the ALL:ALL rule and whitelist only specific trusted hosts/networks.",
+                    module=self.module_name,
+                    check_id="net-013",
+                ))
+                break
+        return findings
+
+    def _check_icmp_redirects(self) -> List[Finding]:
+        findings = []
+        accept_redirects = _read("/proc/sys/net/ipv4/conf/all/accept_redirects").strip()
+        send_redirects = _read("/proc/sys/net/ipv4/conf/all/send_redirects").strip()
+
+        if accept_redirects == "1":
+            findings.append(Finding(
+                title="ICMP redirects accepted (MITM risk)",
+                severity=Severity.MEDIUM,
+                category="Security",
+                description=(
+                    "The system accepts ICMP redirect messages, which an attacker on the "
+                    "local network can use to redirect traffic through their machine (Man-in-the-Middle)."
+                ),
+                evidence="/proc/sys/net/ipv4/conf/all/accept_redirects = 1",
+                remediation="Disable: `sysctl net.ipv4.conf.all.accept_redirects=0` and persist in /etc/sysctl.conf.",
+                cis_refs=["CIS Linux 3.2.2"],
+                module=self.module_name,
+                check_id="net-014",
+            ))
+        if send_redirects == "1":
+            findings.append(Finding(
+                title="ICMP redirect sending enabled",
+                severity=Severity.LOW,
+                category="Security",
+                description="The system sends ICMP redirects, which should be disabled unless acting as a router.",
+                evidence="/proc/sys/net/ipv4/conf/all/send_redirects = 1",
+                remediation="Disable: `sysctl net.ipv4.conf.all.send_redirects=0`.",
+                cis_refs=["CIS Linux 3.2.3"],
+                module=self.module_name,
+                check_id="net-015",
+            ))
+        return findings
+
+    def _check_syn_cookies(self) -> List[Finding]:
+        findings = []
+        val = _read("/proc/sys/net/ipv4/tcp_syncookies").strip()
+        if val == "0":
+            findings.append(Finding(
+                title="TCP SYN cookies disabled (SYN flood vulnerability)",
+                severity=Severity.MEDIUM,
+                category="Security",
+                description=(
+                    "TCP SYN cookies are disabled. Without SYN cookies, the system is "
+                    "vulnerable to SYN flood denial-of-service attacks that exhaust "
+                    "kernel connection tracking resources."
+                ),
+                evidence="/proc/sys/net/ipv4/tcp_syncookies = 0",
+                remediation="Enable: `sysctl net.ipv4.tcp_syncookies=1` and persist in /etc/sysctl.conf.",
+                cis_refs=["CIS Linux 3.2.8"],
+                module=self.module_name,
+                check_id="net-016",
+            ))
+        return findings
+

@@ -28,10 +28,12 @@ _SEV_ORDER = list(reversed(list(Severity)))   # CRITICAL -> INFO
 
 
 class Report:
-    def __init__(self, findings: List[Finding], target: str = "localhost"):
+    def __init__(self, findings: List[Finding], target: str = "localhost", timings: dict = None):
         self.findings = sorted(findings, key=lambda f: -f.severity.value)
         self.target = target
         self.generated_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        self.timings = timings or {}
+        self.total_time = sum(self.timings.values()) if self.timings else 0.0
 
     def summary_counts(self) -> dict:
         counts = {s.name: 0 for s in Severity}
@@ -47,6 +49,8 @@ class Report:
         payload = {
             "target": self.target,
             "generated_at": self.generated_at,
+            "scan_duration_sec": round(self.total_time, 2),
+            "module_timings": {k: round(v, 2) for k, v in self.timings.items()},
             "summary": self.summary_counts(),
             "findings": [f.to_dict() for f in self.findings],
         }
@@ -109,21 +113,30 @@ class Report:
     # -------------------------------------------------------------------------
 
     def to_html(self, path: str) -> None:
-        """Self-contained HTML report with Chart.js severity pie and module bar charts."""
         counts = self.summary_counts()
 
         def badge(sev: Severity) -> str:
             c = SEVERITY_CSS_COLOR[sev]
             return (
-                f'<span style="background:{c};color:#fff;border-radius:4px;'
+                f'<span class="sev-badge" data-sev="{sev.name}" style="background:{c};color:#fff;border-radius:4px;'
                 f'padding:2px 8px;font-size:.82em;font-weight:700">{sev.name}</span>'
             )
 
         def esc(s: str) -> str:
             return (
-                s.replace("&", "&amp;").replace("<", "&lt;")
+                str(s).replace("&", "&amp;").replace("<", "&lt;")
                  .replace(">", "&gt;").replace('"', "&quot;")
             )
+
+        # Risk Score Gauge
+        avg_risk = 0
+        if self.findings:
+            avg_risk = int(sum(f.risk_score for f in self.findings) / len(self.findings))
+        risk_color = "#48bb78"
+        if avg_risk > 70:
+            risk_color = "#e53e3e"
+        elif avg_risk > 40:
+            risk_color = "#d69e2e"
 
         # Chart data
         pie_sevs   = [s for s in _SEV_ORDER if counts[s.name] > 0]
@@ -136,12 +149,10 @@ class Report:
         bar_data    = _json.dumps(list(mod_counts.values()))
         bar_colors  = _json.dumps(["#4299e1"] * len(mod_counts))
 
-        # Summary table
-        summary_rows = "".join(
-            f"<tr><td>{badge(sev)}</td>"
-            f"<td><strong>{counts[sev.name]}</strong></td></tr>"
-            for sev in _SEV_ORDER
-        )
+        # Timing HTML
+        timing_html = ""
+        if self.total_time > 0:
+            timing_html = f"Scan duration: <strong>{self.total_time:.1f}s</strong>"
 
         # Finding cards
         cards = []
@@ -151,49 +162,48 @@ class Report:
             if f.cve_refs:
                 refs += f"<p><strong>CVE refs:</strong> {esc(', '.join(f.cve_refs))}</p>"
             if f.cis_refs:
-                refs += (
-                    f"<p><strong>CIS/STIG refs:</strong> "
-                    f"{esc(', '.join(f.cis_refs))}</p>"
-                )
+                refs += f"<p><strong>CIS/STIG refs:</strong> {esc(', '.join(f.cis_refs))}</p>"
+            
             evidence_block = ""
             if f.evidence:
                 evidence_block = (
-                    f"<details><summary style='cursor:pointer;color:#4a5568;"
-                    f"font-size:.9em'>Show evidence</summary>"
-                    f"<pre style='background:#f4f4f4;padding:10px;border-radius:4px;"
-                    f"overflow-x:auto;margin-top:8px'>{esc(f.evidence)}</pre>"
+                    f"<details><summary style='cursor:pointer;color:#4a5568;font-size:.9em'>Show evidence</summary>"
+                    f"<pre style='background:#f4f4f4;padding:10px;border-radius:4px;overflow-x:auto;margin-top:8px'>{esc(f.evidence)}</pre>"
                     f"</details>"
                 )
             remediation_block = ""
             if f.remediation:
                 remediation_block = (
-                    f"<div style='background:#f0fff4;border-left:3px solid #48bb78;"
-                    f"padding:8px 12px;margin-top:8px;border-radius:0 4px 4px 0'>"
+                    f"<div style='background:#f0fff4;border-left:3px solid #48bb78;padding:8px 12px;margin-top:8px;border-radius:0 4px 4px 0'>"
                     f"<strong>Remediation:</strong> {esc(f.remediation)}</div>"
                 )
+            
             cards.append(
-                f'<div class="card" style="border-left:4px solid {c}">'
-                f'<h3 style="margin:0 0 6px 0;font-size:1em">'
-                f'{badge(f.severity)} {esc(f.title)}</h3>'
-                f'<p style="color:#718096;font-size:.82em;margin:0 0 8px 0">'
+                f'<div class="card finding-card" data-severity="{f.severity.name}" data-category="{esc(f.category)}" style="border-left:4px solid {c}">'
+                f'<div style="display:flex;justify-content:space-between;align-items:flex-start;">'
+                f'<h3 style="margin:0 0 6px 0;font-size:1.1em">{badge(f.severity)} {esc(f.title)}</h3>'
+                f'<span style="background:#edf2f7;color:#4a5568;padding:2px 8px;border-radius:12px;font-size:0.8em;font-weight:600">Risk: {f.risk_score}</span>'
+                f'</div>'
+                f'<p style="color:#718096;font-size:.85em;margin:0 0 8px 0">'
+                f'Category: <strong>{esc(f.category)}</strong> &nbsp;|&nbsp; '
                 f'Module: <code>{esc(f.module)}</code> &nbsp;|&nbsp; '
                 f'Check: <code>{esc(f.check_id)}</code></p>'
                 f'{refs}'
-                f'<p style="margin:6px 0">{esc(f.description)}</p>'
+                f'<p class="finding-desc" style="margin:6px 0">{esc(f.description)}</p>'
                 f'{evidence_block}{remediation_block}</div>'
             )
 
-        findings_html = (
-            "\n".join(cards) if cards else
-            "<p style='color:#718096'>No findings recorded.</p>"
+        findings_html = "\n".join(cards) if cards else "<p style='color:#718096'>No findings recorded.</p>"
+
+        # Filters
+        filter_buttons = "".join(
+            f'<button class="filter-btn" data-filter="{sev.name}" style="background:{SEVERITY_CSS_COLOR[sev]}">{sev.name} ({counts[sev.name]})</button>'
+            for sev in _SEV_ORDER if counts[sev.name] > 0
         )
 
         html = (
-            "<!DOCTYPE html>\n"
-            '<html lang="en">\n'
-            "<head>\n"
-            '  <meta charset="UTF-8"/>\n'
-            '  <meta name="viewport" content="width=device-width,initial-scale=1"/>\n'
+            "<!DOCTYPE html>\n<html lang='en'>\n<head>\n"
+            "  <meta charset='UTF-8'/>\n  <meta name='viewport' content='width=device-width,initial-scale=1'/>\n"
             f"  <title>VulnScan Report - {esc(self.target)}</title>\n"
             "  <script src=\"https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js\"></script>\n"
             "  <style>\n"
@@ -201,97 +211,72 @@ class Report:
             "    body{font-family:system-ui,-apple-system,sans-serif;background:#f0f4f8;color:#2d3748}\n"
             "    .topbar{background:linear-gradient(135deg,#1a202c,#2d3748);color:#fff;padding:20px 32px}\n"
             "    .topbar h1{font-size:1.3em;font-weight:700}\n"
-            "    .topbar .meta{font-size:.82em;color:#a0aec0;margin-top:4px}\n"
+            "    .topbar .meta{font-size:.85em;color:#a0aec0;margin-top:8px}\n"
             "    .container{max-width:1100px;margin:0 auto;padding:24px}\n"
-            "    .grid2{display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-bottom:20px}\n"
+            "    .grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:20px;margin-bottom:20px}\n"
             "    .panel{background:#fff;border-radius:8px;box-shadow:0 1px 4px rgba(0,0,0,.08);padding:20px}\n"
-            "    .panel h2{font-size:.78em;font-weight:700;margin-bottom:14px;color:#4a5568;"
-            "text-transform:uppercase;letter-spacing:.06em}\n"
-            "    table{border-collapse:collapse;width:100%}\n"
-            "    td,th{padding:7px 12px;text-align:left;border-bottom:1px solid #edf2f7;font-size:.9em}\n"
-            "    th{background:#f7fafc;font-weight:600;color:#4a5568;font-size:.78em;text-transform:uppercase}\n"
-            "    .card{background:#fff;border-radius:6px;box-shadow:0 1px 3px rgba(0,0,0,.07);"
-            "padding:16px 20px;margin-bottom:12px;transition:box-shadow .15s}\n"
+            "    .panel h2{font-size:.85em;font-weight:700;margin-bottom:14px;color:#4a5568;text-transform:uppercase;letter-spacing:.06em}\n"
+            "    .card{background:#fff;border-radius:6px;box-shadow:0 1px 3px rgba(0,0,0,.07);padding:16px 20px;margin-bottom:12px;transition:box-shadow .15s}\n"
             "    .card:hover{box-shadow:0 3px 8px rgba(0,0,0,.12)}\n"
             "    pre{white-space:pre-wrap;word-break:break-all;font-size:.83em;line-height:1.5}\n"
-            "    code{background:#edf2f7;padding:1px 5px;border-radius:3px;font-size:.88em;font-family:monospace}\n"
-            "    .chart-wrap{position:relative;height:220px}\n"
-            "    @media(max-width:680px){.grid2{grid-template-columns:1fr}}\n"
-            "  </style>\n"
-            "</head>\n"
-            "<body>\n"
-            '<div class="topbar">\n'
-            "  <div>\n"
+            "    code{background:#edf2f7;padding:2px 6px;border-radius:4px;font-size:.85em;font-family:monospace}\n"
+            "    .chart-wrap{position:relative;height:180px}\n"
+            "    .filter-btn{border:none;color:#fff;padding:6px 12px;border-radius:20px;font-size:.85em;font-weight:600;cursor:pointer;margin-right:8px;opacity:0.6;transition:opacity 0.2s}\n"
+            "    .filter-btn.active{opacity:1}\n"
+            "    .search-box{width:100%;padding:10px 14px;border:1px solid #cbd5e0;border-radius:6px;font-size:1em;margin-bottom:16px}\n"
+            "    .risk-gauge{text-align:center;font-size:3em;font-weight:800;line-height:1.2;margin-top:20px}\n"
+            "    @media(max-width:800px){.grid3{grid-template-columns:1fr}}\n"
+            "  </style>\n</head>\n<body>\n"
+            "<div class='topbar'>\n  <div>\n"
             "    <h1>VulnScan - Vulnerability Assessment Report</h1>\n"
-            '    <div class="meta">\n'
-            f"      Target: <strong>{esc(self.target)}</strong> &nbsp;|&nbsp;\n"
-            f"      Generated: {esc(self.generated_at)} &nbsp;|&nbsp;\n"
-            f"      Total findings: <strong>{len(self.findings)}</strong>\n"
+            f"    <div class='meta'>Target: <strong>{esc(self.target)}</strong> &nbsp;|&nbsp; Generated: {esc(self.generated_at)} &nbsp;|&nbsp; {timing_html}</div>\n"
+            "  </div>\n</div>\n"
+            "<div class='container'>\n"
+            "  <div class='grid3'>\n"
+            "    <div class='panel'><h2>Average Risk Score</h2><div class='risk-gauge' style='color:"+risk_color+"'>"+str(avg_risk)+"</div><div style='text-align:center;color:#718096;font-size:0.9em;margin-top:8px'>(0-100 Scale)</div></div>\n"
+            "    <div class='panel'><h2>Severity Distribution</h2><div class='chart-wrap'><canvas id='pieChart'></canvas></div></div>\n"
+            "    <div class='panel'><h2>Findings by Module</h2><div class='chart-wrap'><canvas id='barChart'></canvas></div></div>\n"
+            "  </div>\n"
+            "  <div class='panel' style='margin-bottom:20px;background:#f7fafc'>\n"
+            "    <div style='display:flex;justify-content:space-between;align-items:center'>\n"
+            "      <div><strong>Filter:</strong> <button class='filter-btn active' data-filter='ALL' style='background:#4a5568'>ALL</button>" + filter_buttons + "</div>\n"
+            "      <input type='text' id='search' class='search-box' style='width:300px;margin:0' placeholder='Search findings...'>\n"
             "    </div>\n"
             "  </div>\n"
+            "  <div class='panel'><h2>Findings ("+str(len(self.findings))+")</h2><div id='findingsList' style='margin-top:14px'>" + findings_html + "</div></div>\n"
             "</div>\n"
-            '\n<div class="container">\n'
-            '\n  <div class="grid2">\n'
-            '    <div class="panel">\n'
-            "      <h2>Severity Summary</h2>\n"
-            "      <table>\n"
-            "        <tr><th>Severity</th><th>Count</th></tr>\n"
-            f"        {summary_rows}\n"
-            "      </table>\n"
-            "    </div>\n"
-            '    <div class="panel">\n'
-            "      <h2>Severity Distribution</h2>\n"
-            '      <div class="chart-wrap"><canvas id="pieChart"></canvas></div>\n'
-            "    </div>\n"
-            "  </div>\n"
-            '\n  <div class="panel" style="margin-bottom:20px">\n'
-            "    <h2>Findings by Module</h2>\n"
-            '    <div class="chart-wrap" style="height:180px">'
-            '<canvas id="barChart"></canvas></div>\n'
-            "  </div>\n"
-            '\n  <div class="panel">\n'
-            "    <h2>Findings</h2>\n"
-            '    <div style="margin-top:14px">\n'
-            f"      {findings_html}\n"
-            "    </div>\n"
-            "  </div>\n"
-            "\n</div>\n"
-            "\n<script>\n"
+            "<script>\n"
             "(function() {\n"
-            "  new Chart(document.getElementById('pieChart'), {\n"
-            "    type: 'doughnut',\n"
-            "    data: {\n"
-            f"      labels: {pie_labels},\n"
-            f"      datasets: [{{ data: {pie_data}, backgroundColor: {pie_colors}, borderWidth: 2 }}]\n"
-            "    },\n"
-            "    options: {\n"
-            "      responsive: true, maintainAspectRatio: false,\n"
-            "      plugins: { legend: { position: 'right', labels: { font: { size: 11 } } } }\n"
-            "    }\n"
-            "  });\n"
-            "  new Chart(document.getElementById('barChart'), {\n"
-            "    type: 'bar',\n"
-            "    data: {\n"
-            f"      labels: {bar_labels},\n"
-            "      datasets: [{\n"
-            "        label: 'Findings',\n"
-            f"        data: {bar_data},\n"
-            f"        backgroundColor: {bar_colors},\n"
-            "        borderRadius: 4\n"
-            "      }]\n"
-            "    },\n"
-            "    options: {\n"
-            "      responsive: true, maintainAspectRatio: false,\n"
-            "      plugins: { legend: { display: false } },\n"
-            "      scales: {\n"
-            "        y: { beginAtZero: true, ticks: { stepSize: 1, font: { size: 11 } } },\n"
-            "        x: { ticks: { font: { size: 11 } } }\n"
-            "      }\n"
-            "    }\n"
+            "  new Chart(document.getElementById('pieChart'), { type: 'doughnut', data: { labels: " + pie_labels + ", datasets: [{ data: " + pie_data + ", backgroundColor: " + pie_colors + ", borderWidth: 2 }] }, options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'right', labels: { font: { size: 11 } } } } } });\n"
+            "  new Chart(document.getElementById('barChart'), { type: 'bar', data: { labels: " + bar_labels + ", datasets: [{ label: 'Findings', data: " + bar_data + ", backgroundColor: " + bar_colors + ", borderRadius: 4 }] }, options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true, ticks: { stepSize: 1, font: { size: 11 } } }, x: { ticks: { font: { size: 11 } } } } } });\n"
+            "  \n"
+            "  const searchInput = document.getElementById('search');\n"
+            "  const filterBtns = document.querySelectorAll('.filter-btn');\n"
+            "  const cards = document.querySelectorAll('.finding-card');\n"
+            "  let currentFilter = 'ALL';\n"
+            "  \n"
+            "  function filterCards() {\n"
+            "    const query = searchInput.value.toLowerCase();\n"
+            "    cards.forEach(card => {\n"
+            "      const text = card.textContent.toLowerCase();\n"
+            "      const sev = card.getAttribute('data-severity');\n"
+            "      const matchesSearch = text.includes(query);\n"
+            "      const matchesFilter = currentFilter === 'ALL' || sev === currentFilter;\n"
+            "      card.style.display = (matchesSearch && matchesFilter) ? 'block' : 'none';\n"
+            "    });\n"
+            "  }\n"
+            "  \n"
+            "  searchInput.addEventListener('input', filterCards);\n"
+            "  \n"
+            "  filterBtns.forEach(btn => {\n"
+            "    btn.addEventListener('click', () => {\n"
+            "      filterBtns.forEach(b => b.classList.remove('active'));\n"
+            "      btn.classList.add('active');\n"
+            "      currentFilter = btn.getAttribute('data-filter');\n"
+            "      filterCards();\n"
+            "    });\n"
             "  });\n"
             "})();\n"
-            "</script>\n"
-            "</body>\n"
-            "</html>\n"
+            "</script>\n</body>\n</html>\n"
         )
         Path(path).write_text(html, encoding="utf-8")

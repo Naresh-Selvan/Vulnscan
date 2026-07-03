@@ -39,6 +39,19 @@ class Finding:
     module: str = ""
     check_id: str = ""
     timestamp: str = field(default_factory=_utc_now_iso)
+    risk_score: int = -1          # 0-100; -1 = auto-calculate from severity
+    category: str = "Security"    # Security | System Health | Performance
+    affected_asset: str = ""      # e.g. specific file, service, package
+
+    def __post_init__(self):
+        if self.risk_score == -1:
+            self.risk_score = {
+                Severity.CRITICAL: 95,
+                Severity.HIGH: 75,
+                Severity.MEDIUM: 50,
+                Severity.LOW: 25,
+                Severity.INFO: 10,
+            }.get(self.severity, 0)
 
     def to_dict(self) -> dict:
         return {
@@ -52,6 +65,9 @@ class Finding:
             "module": self.module,
             "check_id": self.check_id,
             "timestamp": self.timestamp,
+            "risk_score": self.risk_score,
+            "category": self.category,
+            "affected_asset": self.affected_asset,
         }
 
 

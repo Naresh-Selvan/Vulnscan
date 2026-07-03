@@ -35,6 +35,12 @@ ALL_MODULES = [
     ("modules.nfs_checker",        "NfsChecker"),
     ("modules.services_checker",   "ServicesChecker"),
     ("modules.system_checker",     "SystemChecker"),
+    ("modules.memory_checker",     "MemoryChecker"),
+    ("modules.user_checker",       "UserChecker"),
+    ("modules.cpu_checker",        "CpuChecker"),
+    ("modules.binary_checker",     "BinaryChecker"),
+    ("modules.bootkit_checker",    "BootkitChecker"),
+    ("modules.ipc_checker",        "IpcChecker"),
 ]
 
 

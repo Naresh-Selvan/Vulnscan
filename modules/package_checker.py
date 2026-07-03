@@ -40,6 +40,10 @@ class PackageChecker(Checker):
             "Match installed package versions against OSV.dev CVE database (batch API)",
             "Check APT/DNF GPG signature verification is enforced",
             "Check for available security updates",
+            "Check for held packages (blocked from security updates)",
+            "Detect unofficial/third-party package repositories",
+            "Cross-reference SUID/SGID binaries with package ownership",
+            "Verify package integrity (debsums / rpm -Va)",
         ]
 
     def run(self) -> List[Finding]:
@@ -58,9 +62,17 @@ class PackageChecker(Checker):
             packages = self._list_dpkg_packages()
             findings += self._check_apt_gpg()
             findings += self._check_apt_updates()
+            findings += self._check_held_packages_dpkg()
+            findings += self._check_unofficial_repos_apt()
+            findings += self._check_package_integrity_dpkg()
+            findings += self._check_setuid_packages_dpkg()
         elif pkg_manager == "rpm":
             packages = self._list_rpm_packages()
             findings += self._check_dnf_gpg()
+            findings += self._check_held_packages_rpm()
+            findings += self._check_unofficial_repos_rpm()
+            findings += self._check_package_integrity_rpm()
+            findings += self._check_setuid_packages_rpm()
         else:
             findings.append(Finding(
                 title="Unknown package manager",
@@ -313,3 +325,225 @@ class PackageChecker(Checker):
             "LOW": Severity.LOW,
         }
         return mapping.get(severity_str, Severity.MEDIUM)
+
+    # ── New Deep Checks ───────────────────────────────────────────────────────
+
+    def _check_held_packages_dpkg(self) -> List[Finding]:
+        findings = []
+        out = _run(["dpkg", "--get-selections"])
+        held = [l.split()[0] for l in out.splitlines() if "hold" in l]
+        if held:
+            findings.append(Finding(
+                title="Packages held back from updates (dpkg)",
+                severity=Severity.MEDIUM,
+                category="System Health",
+                description=(
+                    "One or more packages are marked as 'hold'. They will not be upgraded "
+                    "during system updates, which means they will miss critical security patches."
+                ),
+                evidence="\n".join(held[:10]),
+                remediation="Review held packages and unhold them if safe: `apt-mark unhold <package>`.",
+                module=self.module_name,
+                check_id="pkg-005",
+            ))
+        return findings
+
+    def _check_held_packages_rpm(self) -> List[Finding]:
+        findings = []
+        out = _run(["dnf", "versionlock", "list"])
+        held = [l for l in out.splitlines() if l.strip() and not l.startswith("Last metadata")]
+        if held:
+            findings.append(Finding(
+                title="Packages held back from updates (dnf versionlock)",
+                severity=Severity.MEDIUM,
+                category="System Health",
+                description=(
+                    "Packages are locked to a specific version. They will not receive "
+                    "security updates. This is often done for compatibility but introduces risk."
+                ),
+                evidence="\n".join(held[:10]),
+                remediation="Review versionlocks and remove them if safe: `dnf versionlock delete <package>`.",
+                module=self.module_name,
+                check_id="pkg-006",
+            ))
+        return findings
+
+    def _check_unofficial_repos_apt(self) -> List[Finding]:
+        findings = []
+        out = _run(["apt-cache", "policy"])
+        repos = set()
+        for line in out.splitlines():
+            if line.strip().startswith("500 http") or line.strip().startswith("100 http"):
+                parts = line.split()
+                if len(parts) >= 2:
+                    repos.add(parts[1])
+        
+        unofficial = []
+        official_domains = ["ubuntu.com", "debian.org", "kali.org"]
+        for repo in repos:
+            if not any(domain in repo for domain in official_domains):
+                unofficial.append(repo)
+
+        if unofficial:
+            findings.append(Finding(
+                title="Unofficial/Third-party APT repositories configured",
+                severity=Severity.LOW,
+                category="Security",
+                description=(
+                    "The system is configured to pull packages from third-party repositories. "
+                    "If a third-party repository is compromised, malicious packages could be "
+                    "installed on the system."
+                ),
+                evidence="\n".join(unofficial),
+                remediation="Audit third-party repos in /etc/apt/sources.list.d/. Remove if no longer needed.",
+                module=self.module_name,
+                check_id="pkg-007",
+            ))
+        return findings
+
+    def _check_unofficial_repos_rpm(self) -> List[Finding]:
+        findings = []
+        out = _run(["dnf", "repolist", "-v"])
+        repos = []
+        current_repo = ""
+        for line in out.splitlines():
+            if line.startswith("Repo-id"):
+                current_repo = line.split(":", 1)[1].strip()
+            elif line.startswith("Repo-baseurl") and current_repo:
+                url = line.split(":", 1)[1].strip()
+                repos.append((current_repo, url))
+        
+        unofficial = []
+        official_domains = ["fedoraproject.org", "centos.org", "redhat.com", "almalinux.org", "rockylinux.org"]
+        for repo_id, url in repos:
+            if not any(domain in url for domain in official_domains):
+                unofficial.append(f"{repo_id}: {url}")
+
+        if unofficial:
+            findings.append(Finding(
+                title="Unofficial/Third-party DNF/YUM repositories configured",
+                severity=Severity.LOW,
+                category="Security",
+                description="The system uses third-party repositories which increases supply chain risk.",
+                evidence="\n".join(unofficial),
+                remediation="Audit third-party repos in /etc/yum.repos.d/.",
+                module=self.module_name,
+                check_id="pkg-008",
+            ))
+        return findings
+
+    def _check_package_integrity_dpkg(self) -> List[Finding]:
+        findings = []
+        if not shutil.which("debsums"):
+            findings.append(Finding(
+                title="Package integrity tool (debsums) not installed",
+                severity=Severity.INFO,
+                category="Security",
+                description="debsums is not installed. Cannot verify if installed package files have been modified.",
+                remediation="Install debsums: `apt install debsums`.",
+                module=self.module_name,
+                check_id="pkg-009",
+            ))
+            return findings
+
+        # Run debsums on a fast subset (binaries and configs), timeout 120s
+        out = _run(["debsums", "-c", "-e"], timeout=120)
+        altered = [l for l in out.splitlines() if l.strip()]
+        if altered:
+            findings.append(Finding(
+                title="Package integrity verification failed (altered files)",
+                severity=Severity.HIGH,
+                category="Security",
+                risk_score=85,
+                description=(
+                    "Files managed by the package manager have been modified since installation. "
+                    "This could indicate tampering, rootkits, or unauthorized configuration changes."
+                ),
+                evidence="\n".join(altered[:15]),
+                remediation="Investigate altered files. Reinstall affected packages: `apt --reinstall install <package>`.",
+                module=self.module_name,
+                check_id="pkg-010",
+                affected_asset=altered[0].split()[0] if altered else "",
+            ))
+        return findings
+
+    def _check_package_integrity_rpm(self) -> List[Finding]:
+        findings = []
+        # rpm -Va checks all packages. -nomtime ignores timestamp changes. Timeout 120s.
+        out = _run(["rpm", "-Va", "--nomtime"], timeout=120)
+        altered = []
+        for line in out.splitlines():
+            # Check for '5' (MD5/SHA sum mismatch) or 'S' (File size mismatch)
+            if len(line) > 10 and (line[0] == 'S' or line[2] == '5'):
+                altered.append(line)
+
+        if altered:
+            findings.append(Finding(
+                title="Package integrity verification failed (altered files)",
+                severity=Severity.HIGH,
+                category="Security",
+                risk_score=85,
+                description="Files managed by RPM have been modified, indicating possible tampering.",
+                evidence="\n".join(altered[:15]),
+                remediation="Investigate altered files. Reinstall affected packages.",
+                module=self.module_name,
+                check_id="pkg-011",
+            ))
+        return findings
+
+    def _check_setuid_packages_dpkg(self) -> List[Finding]:
+        findings = []
+        # Find all SUID binaries
+        out = _run(["find", "/", "-type", "f", "-perm", "-4000", "-xdev"])
+        suid_files = [l.strip() for l in out.splitlines() if l.strip()]
+        
+        untracked = []
+        for file in suid_files:
+            # Check if dpkg owns this file
+            dpkg_out = _run(["dpkg", "-S", file])
+            if "no path found matching pattern" in dpkg_out.lower():
+                untracked.append(file)
+
+        if untracked:
+            findings.append(Finding(
+                title="Untracked SUID binaries found",
+                severity=Severity.HIGH,
+                category="Security",
+                risk_score=85,
+                description=(
+                    "SUID root binaries were found that do not belong to any installed package. "
+                    "This is highly suspicious and often indicates a backdoor or privilege escalation tool "
+                    "left behind by an attacker."
+                ),
+                evidence="\n".join(untracked),
+                remediation="Investigate the binaries immediately and remove them if unauthorized.",
+                module=self.module_name,
+                check_id="pkg-012",
+                affected_asset=untracked[0],
+            ))
+        return findings
+
+    def _check_setuid_packages_rpm(self) -> List[Finding]:
+        findings = []
+        out = _run(["find", "/", "-type", "f", "-perm", "-4000", "-xdev"])
+        suid_files = [l.strip() for l in out.splitlines() if l.strip()]
+        
+        untracked = []
+        for file in suid_files:
+            rpm_out = _run(["rpm", "-qf", file])
+            if "is not owned by any package" in rpm_out.lower():
+                untracked.append(file)
+
+        if untracked:
+            findings.append(Finding(
+                title="Untracked SUID binaries found",
+                severity=Severity.HIGH,
+                category="Security",
+                risk_score=85,
+                description="SUID root binaries were found that do not belong to any installed RPM package.",
+                evidence="\n".join(untracked),
+                remediation="Investigate the binaries immediately and remove them if unauthorized.",
+                module=self.module_name,
+                check_id="pkg-013",
+            ))
+        return findings
